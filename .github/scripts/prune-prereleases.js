@@ -1,68 +1,69 @@
-// In case node 21 is not used.
+// Grouping function
 function groupBy(array, keyOrIterator) {
-    var iterator;
+    const iterator = typeof keyOrIterator === 'function' 
+        ? keyOrIterator 
+        : item => item[String(keyOrIterator)];
 
-    // use the function passed in, or create one
-    if(typeof keyOrIterator !== 'function') {
-        const key = String(keyOrIterator);
-        iterator = function (item) { return item[key]; };
-    } else {
-        iterator = keyOrIterator;
-    }
-
-    return array.reduce(function (memo, item) {
+    return array.reduce((memo, item) => {
         const key = iterator(item);
-        memo[key] = memo[key] || [];
+        if (!memo[key]) {
+            memo[key] = [];
+        }
         memo[key].push(item);
         return memo;
     }, {});
 }
 
 module.exports = async ({ github, context }) => {
-    console.log("Pruning old prereleases");
+    try {
+        console.log("Pruning old prereleases");
 
-    // doc: https://docs.github.com/en/rest/releases/releases
-    const { data: releases } = await github.rest.repos.listReleases({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-    });
-
-    let nightlies = releases.filter(
-        release =>
-            // Only consider releases tagged `nightly-${SHA}` for deletion
-            release.tag_name.includes("nightly") &&
-            release.tag_name !== "nightly"
-    );
-
-    // Pruning rules:
-    //   1. only keep the earliest (by created_at) release of the month
-    //   2. to keep the newest 3 nightlies
-    // Notes:
-    //   - This addresses https://github.com/foundry-rs/foundry/issues/6732
-    //   - Name of the release may deviate from created_at due to the usage of different timezones.
-
-    // Group releases by months.
-    // Per doc:
-    // > The latest release is the most recent non-prerelease, non-draft release, sorted by the created_at attribute.
-    const groups = groupBy(nightlies, i => i.created_at.slice(0, 7));
-    const nightliesToPrune = Object.values(groups)
-        .reduce((acc, cur) => acc.concat(cur.slice(0, -1)), []) // rule 1
-        .slice(3); // rule 2
-
-    for (const nightly of nightliesToPrune) {
-        console.log(`Deleting nightly: ${nightly.tag_name}`);
-        await github.rest.repos.deleteRelease({
+        // Fetching releases from GitHub
+        const { data: releases } = await github.rest.repos.listReleases({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            release_id: nightly.id,
         });
-        console.log(`Deleting nightly tag: ${nightly.tag_name}`);
-        await github.rest.git.deleteRef({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            ref: `tags/${nightly.tag_name}`,
-        });
+
+        // Filter releases with 'nightly' tag
+        const nightlies = releases.filter(
+            release =>
+                release.tag_name.includes("nightly") && release.tag_name !== "nightly"
+        );
+
+        // Group releases by year and month (YYYY-MM format)
+        const groupedByMonth = groupBy(nightlies, release => release.created_at.slice(0, 7));
+
+        // Apply pruning rules: 1. Keep the earliest release per month, 2. Keep the newest 3 nightlies
+        const nightliesToPrune = Object.values(groupedByMonth)
+            .reduce((acc, monthReleases) => {
+                // Keep all but the most recent release per month
+                acc.push(...monthReleases.slice(0, -1));
+                return acc;
+            }, [])
+            .slice(3); // Keep only the newest 3 nightlies
+
+        // Deleting releases and tags
+        for (const nightly of nightliesToPrune) {
+            console.log(`Deleting nightly: ${nightly.tag_name}`);
+
+            // Delete release
+            await github.rest.repos.deleteRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: nightly.id,
+            });
+
+            // Delete release tag
+            console.log(`Deleting nightly tag: ${nightly.tag_name}`);
+            await github.rest.git.deleteRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${nightly.tag_name}`,
+            });
+        }
+
+        console.log("Done.");
+    } catch (error) {
+        console.error("Error during pruning:", error);
     }
-
-    console.log("Done.");
 };
